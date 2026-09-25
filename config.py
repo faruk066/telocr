@@ -31,8 +31,8 @@ GEMINI_MODEL: str = _get_env("GEMINI_MODEL", default="gemini-2.5-flash") or "gem
 # --- NVIDIA NIM yedek saglayici (opsiyonel) ---
 NVIDIA_API_KEY: str = _get_env("NVIDIA_API_KEY", default="") or ""
 NVIDIA_MODEL: str = (
-    _get_env("NVIDIA_MODEL", default="meta/llama-3.2-11b-vision-instruct")
-    or "meta/llama-3.2-11b-vision-instruct"
+    _get_env("NVIDIA_MODEL", default="moonshotai/kimi-k3")
+    or "moonshotai/kimi-k3"
 )
 # NVIDIA toplam timeout (sn): ucretsiz ucta gecikme 7-120 sn arasinda degisiyor,
 # 120 sn'de kesilmesin diye 240'a cikarildi (akis erken kapandiginda beklemez).
@@ -40,9 +40,24 @@ NVIDIA_TIMEOUT_S = int(_get_env("NVIDIA_TIMEOUT_S", default="240") or "240")
 # NVIDIA'ya gonderilen gorsel kucultulur (hiz icin; Gemini yolu etkilenmez)
 NVIDIA_IMAGE_MAX_LONG_EDGE = int(_get_env("NVIDIA_IMAGE_MAX_LONG_EDGE", default="1280") or "1280")
 NVIDIA_IMAGE_JPEG_QUALITY = int(_get_env("NVIDIA_IMAGE_JPEG_QUALITY", default="80") or "80")
-# Cikti token limiti: form basina ~40 satir x ~60 token. 2048 kesilip JSON'u
-# yarim biraktigi icin 4096'ya cikarildi (olculdu: kisa istemle 3 satir ~7 sn).
-NVIDIA_MAX_TOKENS = int(_get_env("NVIDIA_MAX_TOKENS", default="4096") or "4096")
+# Cikti token limiti: gercek formda 4096 yarim JSON'a yetismedi (finish=length,
+# pros olarak 22+ satir uretildi). NIM'in izin verdigi ust sinir 8192.
+NVIDIA_MAX_TOKENS = int(_get_env("NVIDIA_MAX_TOKENS", default="16384") or "16384")
+# Kimi-K3 (reasoning model) uretim parametreleri.
+# OLculmus: reasoning_effort=low -> 117 sn'de dogru JSON; "max" -> NVIDIA gateway
+# 504 (302 sn, bos govde) donuyor. Varsayilan "low"; "max" icin tek env degisimi
+# yeterli (Render'da NVIDIA_REASONING_EFFORT=max). 2. deneme zaten otomatik
+# olarak "low"a duser.
+NVIDIA_MAX_TOKENS = int(_get_env("NVIDIA_MAX_TOKENS", default="16384") or "16384")
+NVIDIA_TEMPERATURE = float(_get_env("NVIDIA_TEMPERATURE", default="1") or "1")
+NVIDIA_SEED = int(_get_env("NVIDIA_SEED", default="0") or "0")
+NVIDIA_REASONING_EFFORT: str = (
+    _get_env("NVIDIA_REASONING_EFFORT", default="low") or "low"
+)
+# Gateway 504/503 verirse 2. denemede kullanilacak emniyet degeri.
+NVIDIA_FALLBACK_REASONING_EFFORT: str = (
+    _get_env("NVIDIA_FALLBACK_REASONING_EFFORT", default="low") or "low"
+)
 
 # NVIDIA yedegi aktif mi? AI_PROVIDER_ORDER icinde "nvidia" gecmeli ve key dolu olmali.
 # Ornek: AI_PROVIDER_ORDER=gemini,nvidia

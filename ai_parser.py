@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import re
 from typing import Any
 
 from google import genai
@@ -58,7 +59,8 @@ SYSTEM_PROMPT = (
 # istem kullanilir; is kurallari aynen korunur.
 NVIDIA_SYSTEM_PROMPT = (
     "CEVABIN ilk karakteri '{' olsun. '###' basligi, adim adim aciklama, kod blogu, "
-    "gorsel analizi veya dusunce akisi YAZMA; sadece tek bir JSON objesi yaz.\n"
+    "gorsel analizi, madde listesi veya dusunce akisi YAZMA; sadece tek bir JSON objesi yaz.\n"
+    "JSON'u TEK SATIRDA compact yaz: girintisiz, ```json blogu kullanma, yorum ekleme.\n"
     "Sana verilen sayac formu fotografini oku ve su semaya uygun TEK obje dondur:\n"
     '{"data":[{"BINA":"","DAIRE":"","MARKA":"","SAYAC TURU":"","DURUM":"","TUTAR (TL)":"",'
     '"ESKI ENDEKS":0,"YENI SERI NO (BARKOD)":"","NOTLAR":"","ENLEM":"","BOYLAM":""}]}\n'
@@ -74,6 +76,29 @@ NVIDIA_SYSTEM_PROMPT = (
     "8. Seri numarasi okunamiyorsa o alani BOS string ('') birak; notu veya aciklamayi ASLA "
     "'YENI SERI NO (BARKOD)' alanina yazma. Bos satirlari listeye ekleme."
 )
+
+# Kimi-K3 (reasoning model) icin AYRI ve KISA istem. Olculmus davranis:
+#   - Uzun, kural yogun istemle model 34 karakter reasoning uretip hic icerik
+#     vermeden duruyor (finish='stop', bos icerik).
+#   - Kisa istemle (asagida) 117 sn'de tek satir compact JSON veriyor.
+KIMI_SYSTEM_PROMPT = (
+    "Bu sayac formu fotografini oku ve her satiri JSON'a cikar.\n"
+    'Cevap SADICE su bicimde tek satir bir JSON olsun: {"data":[{"BINA":"","DAIRE":"",'
+    '"MARKA":"","SAYAC TURU":"","DURUM":"","TUTAR (TL)":"","ESKI ENDEKS":0,'
+    '"YENI SERI NO (BARKOD)":"","NOTLAR":"","ENLEM":"","BOYLAM":""}]}\n'
+    "Kurallar: 8 haneli yeni seri numarasi varsa DURUM='Tamamlandi'. Seri yoksa ve daire "
+    "karsisinda 'f' isareti varsa DURUM='faruk'; 'Evde yok'/'Bos' notu varsa "
+    "DURUM='Iptal'. Seri no '30' ile basliyorsa SAYAC TURU='ULTRASONIK', degilse "
+    "'SICAK SU'. 'EEY' notu varsa ESKI ENDEKS=0. Bos satirlari listeye ekleme."
+)
+
+
+def _nvidia_prompt(strict: bool = False) -> str:
+    """Aktif NVIDIA modeline uygun istemi secer (kimi vs digerleri)."""
+    base = (KIMI_SYSTEM_PROMPT if "kimi" in config.NVIDIA_MODEL.lower()
+            else NVIDIA_SYSTEM_PROMPT)
+    return base + (NVIDIA_STRICT_SUFFIX if strict else "")
+
 
 # NVIDIA kucuk modeli bazen basliklari Turkce karakterler olmadan uretir
 # (DAIRE, YENI SERI NO (BARKOD) ...). Pydantic alias'lari aksanli oldugu icin
@@ -262,8 +287,8 @@ NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Tekrar denemede (2. girisim) kullanilan ek talimat: 11B model bazen cevaba
 # basliga/yoruma girip donguye dusuyor; bu eki alinca dogrudan JSON'a basliyor.
 NVIDIA_STRICT_SUFFIX = (
-    "\n\nONEMLI: Sadece JSON yaz. Cevabina dogrudan '{' karakteri ile basla, "
-    "aciklama/baslik/kod blogu yazma."
+    "\n\nONEMLI: Simdi sadece tek satir compact JSON uret. Ilk karakter '{' olsun; "
+    "baslik, aciklama, ```json blogu, madde listesi yazma."
 )
 
 
@@ -355,6 +380,33 @@ def _salvage_partial_rows(text: str) -> list[dict]:
     return _dedupe_exact_rows(rows)
 
 
+# Son care: model JSON yerine aciklama/madde listesi yazdiysa metinden satir
+# cikarma. Ornek satir: "*   Daire 1: 30502527 - DURUM='Tamamlandi'"
+_PROSE_ROW_RE = re.compile(r"daire\s*[:#]?\s*([0-9]{1,3})\s*[:\-]\s*([0-9]{8})?", re.IGNORECASE)
+_PROSE_DURUM_RE = re.compile(r"durum\s*=\s*['\"]?([A-Za-zçÇğĞıİöÖşŞüÜ ]+)['\"]?", re.IGNORECASE)
+
+
+def _rows_from_prose(text: str) -> list[dict]:
+    """Model aciklama metninden 'Daire N: 8haneliSeri' satirlarini kurtarir.
+
+    11B model bazen JSON yerine tabloyu madde listesi olarak yazip token
+    limitine takilir; orada veri zaten mevcuttur. En az 2 satir bulunursa
+    kullanilir (tek satirlik yanilgi karisimasi olmasin diye).
+    """
+    rows: list[dict] = []
+    for line in text.splitlines():
+        m = _PROSE_ROW_RE.search(line)
+        if not m or not m.group(2):
+            continue
+        durum = ""
+        dm = _PROSE_DURUM_RE.search(line)
+        if dm:
+            durum = dm.group(1).strip()
+        rows.append({"DAIRE": m.group(1), "YENI SERI NO (BARKOD)": m.group(2),
+                     "DURUM": durum})
+    return _dedupe_exact_rows(rows)
+
+
 def _extract_json_object(text: str) -> dict:
     """Model ciktisindaki gecerli {"data": ...} JSON objesini bulup parse eder.
 
@@ -424,11 +476,16 @@ def _call_nvidia(image_bytes_list: list[bytes],
     """
     if not image_bytes_list:
         raise ValueError("Islenecek gorsel yok.")
-    prompt = NVIDIA_SYSTEM_PROMPT + (NVIDIA_STRICT_SUFFIX if strict else "")
+    prompt = _nvidia_prompt(strict)
+    # 2. deneme: gateway'in "max" effort icin 504 verdigi olculdu -> emniyet degerine dus
+    effort = (config.NVIDIA_FALLBACK_REASONING_EFFORT if strict
+              else config.NVIDIA_REASONING_EFFORT)
+    logger.info("NVIDIA istemi: model=%s, reasoning_effort=%s, max_tokens=%d, strict=%s",
+                config.NVIDIA_MODEL, effort, config.NVIDIA_MAX_TOKENS, strict)
     merged_rows: list[dict] = []
     for i, image_bytes in enumerate(image_bytes_list):
         payload = _call_nvidia_single(image_bytes, prompt,
-                                      on_first_token if i == 0 else None)
+                                      on_first_token if i == 0 else None, effort)
         rows = payload.get("data") or []
         if not isinstance(rows, list):
             rows = []
@@ -439,11 +496,13 @@ def _call_nvidia(image_bytes_list: list[bytes],
 
 
 def _call_nvidia_single(image_bytes: bytes, prompt: str,
-                        on_first_token: Any | None = None) -> dict:
+                        on_first_token: Any | None = None,
+                        effort: str | None = None) -> dict:
     import requests  # yerel import: sadece nvidia yolu kullanildiginda gerekir
 
     if not config.NVIDIA_API_KEY:
         raise ValueError("NVIDIA_API_KEY bos (.env).")
+    effort = effort or config.NVIDIA_REASONING_EFFORT
     shrunk = _shrink_for_nvidia(image_bytes)
     logger.info("NVIDIA'ya 1 gorsel gonderiliyor (~%d KB, model=%s).",
                 len(shrunk) // 1024, config.NVIDIA_MODEL)
@@ -468,9 +527,12 @@ def _call_nvidia_single(image_bytes: bytes, prompt: str,
             "model": config.NVIDIA_MODEL,
             "messages": [{"role": "user", "content": content}],
             "max_tokens": config.NVIDIA_MAX_TOKENS,
-            "temperature": 0.0,
-            "top_p": 0.95,
+            "seed": config.NVIDIA_SEED,
             "stream": True,
+            "temperature": config.NVIDIA_TEMPERATURE,
+            # Kimi-K3 gibi reasoning modeller icin; desteklemeyen modellerde
+            # sunucu bu alani yok sayar.
+            "reasoning_effort": effort,
         },
         timeout=(30, config.NVIDIA_TIMEOUT_S),
         stream=True,
@@ -480,6 +542,7 @@ def _call_nvidia_single(image_bytes: bytes, prompt: str,
     chunks: list[str] = []
     first_seen = False
     finish_reason = ""
+    reasoning_chars = 0
     buf = ""             # tam cevap metni (aciklama + JSON) burada toplanir
     depth = 0            # suslu parantez derinligi ("{" -> +1, "}" -> -1)
     saw_json_start = False
@@ -501,10 +564,26 @@ def _call_nvidia_single(image_bytes: bytes, prompt: str,
             choice = (obj.get("choices") or [{}])[0]
             if isinstance(choice, dict) and choice.get("finish_reason"):
                 finish_reason = str(choice["finish_reason"])
+            delta_obj = choice.get("delta") if isinstance(choice, dict) else None
+            if not isinstance(delta_obj, dict):
+                delta_obj = {}
+            # Reasoning modelde dusunce delta.reasoning_content ile gelir; JSON'a
+            # girmez ama kullaniciya "okunuyor" bilgisi vermek icin sayilir.
+            reasoning = delta_obj.get("reasoning_content") or ""
+            reasoning_chars += len(reasoning)
             try:
-                delta = choice["delta"].get("content") or ""
-            except (KeyError, IndexError, TypeError, AttributeError):
+                delta = delta_obj.get("content") or ""
+            except AttributeError:
                 delta = ""
+            if not delta and not reasoning:
+                continue
+            if reasoning and not first_seen:
+                first_seen = True
+                if on_first_token is not None:
+                    try:
+                        on_first_token()
+                    except Exception:
+                        pass
             if not delta:
                 continue
             chunks.append(delta)
@@ -551,15 +630,23 @@ def _call_nvidia_single(image_bytes: bytes, prompt: str,
                        config.NVIDIA_MAX_TOKENS, len(chunks))
     text = buf
     if not text.strip():
-        logger.warning("NVIDIA stream hic icerik dondurmedi (finish=%r, %d satir).",
-                       finish_reason, len(chunks))
+        logger.warning("NVIDIA icerik uretmedi (reasoning=%d karakter, finish=%r, "
+                       "max_tokens=%d). reasoning_effort/max_tokens degerlerini gözden geçir.",
+                       reasoning_chars, finish_reason, config.NVIDIA_MAX_TOKENS)
         raise ValueError("NVIDIA bos yanit dondu.")
     try:
         result = _extract_json_object(text)
     except Exception:
-        logger.warning("NVIDIA JSON parse edilemedi (finish=%r, %d chr). "
+        # Son care: model JSON yerine aciklama/madde listesi yazdiysa
+        # ("* Daire 1: 30502527 - DURUM='Tamamlandi'") satirlari metinden cikar.
+        salvaged = _rows_from_prose(text)
+        if len(salvaged) >= 2:
+            logger.warning("NVIDIA JSON uretmedi; aciklama metninden %d satir kurtarildi.",
+                           len(salvaged))
+            return {"data": salvaged}
+        logger.warning("NVIDIA JSON parse edilemedi (finish=%r, %d chr, reasoning=%d). "
                        "Ham yanit (ilk 1000 chr): %.1000s",
-                       finish_reason, len(text), text)
+                       finish_reason, len(text), reasoning_chars, text)
         raise
     n_rows = len(result.get("data") or []) if isinstance(result, dict) else 0
     if n_rows < 3:

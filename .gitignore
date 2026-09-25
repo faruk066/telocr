@@ -13,3 +13,4 @@ _*_err.txt
 _test_out.txt
 _test_err.txt
 
+*.tmp

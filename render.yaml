@@ -19,14 +19,22 @@ services:
       - key: NVIDIA_API_KEY
         sync: false
       - key: NVIDIA_MODEL
-        value: meta/llama-3.2-11b-vision-instruct
+        value: moonshotai/kimi-k3
       - key: AI_PROVIDER_ORDER
         value: gemini,nvidia
       - key: NVIDIA_TIMEOUT_S
-        value: "240"
+        value: "600"
       - key: NVIDIA_IMAGE_MAX_LONG_EDGE
         value: "1280"
       - key: NVIDIA_IMAGE_JPEG_QUALITY
         value: "80"
       - key: NVIDIA_MAX_TOKENS
-        value: "4096"
+        value: "16384"
+      - key: NVIDIA_TEMPERATURE
+        value: "1"
+      - key: NVIDIA_SEED
+        value: "0"
+      - key: NVIDIA_REASONING_EFFORT
+        value: low
+      - key: NVIDIA_FALLBACK_REASONING_EFFORT
+        value: low
