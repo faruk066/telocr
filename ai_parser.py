@@ -43,6 +43,10 @@ SYSTEM_PROMPT = (
     "Ayni DAIRE numarasi birden fazla fotoda geciyorsa: seri numarali (dolu) olani tut, bos olani at; "
     "ikisi de doluysa en net/uzun seri numarali olani tut. Sonucu DAIRE numarasina gore kucukten buyuge "
     "sirala. Ayni daireyi iki kez yazma.\n"
+    "8. RAKAM OKUMA - CIZGILI 7: Turkce/Avrupa yaziminda '7' rakaminin ORTASINDA yatay "
+    "bir cizgi bulunur; boyle yazilan rakam 7'dir, 1 DEGILDIR. Buna cok dikkat et: "
+    "cigli 7'yi 1 sanip seri numarasini bozma. Duz cizgi (cubuk) iceren rakam 1, ortasi "
+    "yatay cizgili olan rakam 7'dir.\n"
     "\nBeklenen JSON Cikti Formati:\n"
     '{"data": [{"BINA": "", "DAIRE": "1", "MARKA": "CALMET", "SAYAC TURU": "ULTRASONIK", '
     '"DURUM": "Tamamlandi", "TUTAR (TL)": "", "ESKI ENDEKS": 0, '
@@ -89,7 +93,9 @@ KIMI_SYSTEM_PROMPT = (
     "Kurallar: 8 haneli yeni seri numarasi varsa DURUM='Tamamlandi'. Seri yoksa ve daire "
     "karsisinda 'f' isareti varsa DURUM='faruk'; 'Evde yok'/'Bos' notu varsa "
     "DURUM='Iptal'. Seri no '30' ile basliyorsa SAYAC TURU='ULTRASONIK', degilse "
-    "'SICAK SU'. 'EEY' notu varsa ESKI ENDEKS=0. Bos satirlari listeye ekleme."
+    "'SICAK SU'. 'EEY' notu varsa ESKI ENDEKS=0. Bos satirlari listeye ekleme.\n"
+    "DIKKAT: Turkce/Avrupa yaziminda '7' rakaminin ortasinda yatay cizgi vardir; oyle "
+    "yazilan rakam 7'dir, 1 degildir."
 )
 
 

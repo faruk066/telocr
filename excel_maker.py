@@ -62,11 +62,44 @@ def _digits(s: object) -> str:
     return re.sub(r"\D", "", str(s or ""))
 
 
+def _looks_like_17_swap(a: str, b: str) -> bool:
+    """Iki seri no arasindaki TUM farklar 1<->7 cifti ve EN AZ 2 hanedeyse True.
+
+    Turkce/Avrupa yaziminda cizgili '7' cogu zaman '1' sanilir; boylece
+    30507777 -> 30501111 gibi, birden fazla hanede olabilen sapmalar olusur ve
+    ayni seri numarasi birden fazla daireye yazilir. Tek hanelik 1/7 farki
+    (ornegin 30501777 / 30501771) rastlantusal olabilecegi icin esik de 2'dir.
+    """
+    if len(a) != len(b) or a == b:
+        return False
+    diffs = [(x, y) for x, y in zip(a, b) if x != y]
+    if len(diffs) < 2:
+        return False
+    return all({x, y} == {"1", "7"} for x, y in diffs)
+
+
 def validate_rows(rows: list[dict]) -> list[dict]:
-    """8-hane + mukerrer kontrolu. Sorunlu satira KONTROL NOTU ekler, islemi durdurmaz."""
+    """8-hane + mukerrer + 1/7 karismasi kontrolu.
+
+    Sorunlu satira KONTROL NOTU ekler, islemi durdurmaz. Mukerrer seri no ve
+    tek hanede 1<->7 farki olan seriler ozellikle isaretlenir (cigli '7' yazan
+    eller '1' okunabiliyor).
+    """
     serials = [_digits(r.get("YENİ SERİ NO (BARKOD)", "")) for r in rows]
     counts = Counter(s for s in serials if s)
     daire_counts = Counter(_daire_key(r.get("DAİRE", "")) for r in rows)
+    daire_by_serial: dict[str, list[str]] = {}
+    for r, s in zip(rows, serials):
+        if s:
+            daire_by_serial.setdefault(s, []).append(str(r.get("DAİRE", "")).strip())
+    # Tüm hanelerinde 1<->7 farki olan seri ciftleri
+    near_miss: dict[str, set[str]] = {}
+    uniq = sorted(daire_by_serial)
+    for i, a in enumerate(uniq):
+        for b in uniq[i + 1:]:
+            if _looks_like_17_swap(a, b):
+                near_miss.setdefault(a, set()).add(b)
+                near_miss.setdefault(b, set()).add(a)
     out: list[dict] = []
     for r, serial in zip(rows, serials):
         warnings: list[str] = []
@@ -74,7 +107,14 @@ def validate_rows(rows: list[dict]) -> list[dict]:
             if len(serial) != 8:
                 warnings.append(f"Seri no 8 haneli degil ({serial})")
             if counts[serial] > 1:
-                warnings.append(f"Mukerrer seri no ({serial})")
+                ds = ", ".join(daire_by_serial[serial])
+                warnings.append(
+                    f"Mukerrer seri no ({serial}) - daire {ds}; 1/7 rakam karismasi olabilir")
+            elif serial in near_miss:
+                others = ", ".join(sorted(near_miss[serial]))
+                warnings.append(
+                    f"Seri {serial} ile {others} yalnizca 1/7 farki iceriyor; "
+                    "cigli 7 / dikey 1 ayrimini kontrol et")
         if daire_counts[_daire_key(r.get("DAİRE", ""))] > 1:
             warnings.append(f"Ayni daire birden fazla satirda ({r.get('DAİRE', '')})")
         # Mevcut NOTLAR'i koru, kontrol notunu ayri sutuna yaz
