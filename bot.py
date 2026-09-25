@@ -241,14 +241,18 @@ async def _run_single_job(chat_id: int, file_id: str, provider: str,
                 await _progress_cb(chat_id, reply_to, context, label)
         else:
             _prog = None
+        used: list[str] = []
         rows = await parse_meter_photos(image_paths, provider=provider,
-                                        on_progress=_prog)
+                                        on_progress=_prog, used_provider=used)
+        # NVIDIA basarisiz olursa kod otomatik olarak Gemini ile yedekler;
+        # mesajda gercekten kullanilan saglayici yazilir.
+        used_label = PROVIDER_LABEL.get(used[0], label) if used else label
         xlsx = await asyncio.to_thread(make_excel, rows)
         with open(xlsx, "rb") as f:
             await context.bot.send_document(
                 chat_id, document=f,
                 filename=os.path.basename(xlsx),
-                caption=f"✅ {len(rows)} satir aktarildi ({label}).",
+                caption=f"✅ {len(rows)} satir aktarildi ({used_label}).",
             )
         _cleanup(image_paths + [xlsx])
     except ValueError as ve:
@@ -275,41 +279,18 @@ async def _run_album_job(chat_id: int, file_ids: list[str], provider: str,
                 await _progress_cb(chat_id, ask_id, context, label)
         else:
             _prog = None
+        used: list[str] = []
         rows: list[dict] = await parse_meter_photos(image_paths, provider=provider,
-                                                    on_progress=_prog)
+                                                    on_progress=_prog,
+                                                    used_provider=used)
+        used_label = PROVIDER_LABEL.get(used[0], label) if used else label
         xlsx = await asyncio.to_thread(make_excel, rows)
         with open(xlsx, "rb") as f:
             await context.bot.send_document(
                 chat_id, document=f,
                 filename=os.path.basename(xlsx),
-                caption=f"✅ {len(rows)} satir aktarildi ({label}).",
-            )
-        _cleanup(image_paths + [xlsx])
-    except ValueError as ve:
-        logger.warning("Tekil isleme uyari (%s): %s", label, ve)
-        await context.bot.send_message(chat_id, str(ve))
-        _cleanup(image_paths)
-    except Exception:
-        logger.error("Tekil isleme hatasi (%s).", label, exc_info=True)
-        await context.bot.send_message(chat_id, "Islem sirasinda bir hata olustu, lutfen tekrar deneyin.")
-        _cleanup(image_paths)
-
-
-async def _run_album_job(chat_id: int, file_ids: list[str], provider: str,
-                         context: ContextTypes.DEFAULT_TYPE,
-                         status_msg=None) -> None:
-    label = PROVIDER_LABEL.get(provider, provider)
-    image_paths: list[str] = []
-    try:
-        for fid in file_ids:
-            image_paths.append(await _download_photo(context, fid))
-        rows: list[dict] = await parse_meter_photos(image_paths, provider=provider)
-        xlsx = await asyncio.to_thread(make_excel, rows)
-        with open(xlsx, "rb") as f:
-            await context.bot.send_document(
-                chat_id, document=f,
-                filename=os.path.basename(xlsx),
-                caption=f"✅ {len(rows)} satir aktarildi ({len(file_ids)} fotograf, {label}).",
+                caption=f"✅ {len(rows)} satir aktarildi ({used_label}, "
+                        f"{len(file_ids)} fotograf).",
             )
         _cleanup(image_paths + [xlsx])
     except ValueError as ve:

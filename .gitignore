@@ -4,4 +4,12 @@ temp/
 __pycache__/
 *.xlsx
 yedek/
+# calisma zamaninda olusturulan model oncelik durumu
+.model_priority.json
+# gecici test/dogrulama betikleri
+_*.py
+_*_out.txt
+_*_err.txt
+_test_out.txt
+_test_err.txt
 

@@ -52,6 +52,133 @@ SYSTEM_PROMPT = (
 # BINA, DAIRE, MARKA, SAYAC TURU, DURUM, TUTAR (TL), ESKI ENDEKS,
 # YENI SERI NO (BARKOD), NOTLAR, ENLEM, BOYLAM
 
+# NVIDIA (Llama-3.2-11B-Vision) uzun/talimat yuklu sistem istemini takip etmekte
+# zorlanir: "Beklenen JSON Cikti Formati" blogunu tekrar tekrar eko eder ve 3 kat
+# yavas doner (olculdu: 20.7 sn vs 7.3 sn). Bu yuzden NVIDIA icin KISA ve net bir
+# istem kullanilir; is kurallari aynen korunur.
+NVIDIA_SYSTEM_PROMPT = (
+    "CEVABIN ilk karakteri '{' olsun. '###' basligi, adim adim aciklama, kod blogu, "
+    "gorsel analizi veya dusunce akisi YAZMA; sadece tek bir JSON objesi yaz.\n"
+    "Sana verilen sayac formu fotografini oku ve su semaya uygun TEK obje dondur:\n"
+    '{"data":[{"BINA":"","DAIRE":"","MARKA":"","SAYAC TURU":"","DURUM":"","TUTAR (TL)":"",'
+    '"ESKI ENDEKS":0,"YENI SERI NO (BARKOD)":"","NOTLAR":"","ENLEM":"","BOYLAM":""}]}\n'
+    "Kurallar:\n"
+    "1. 8 haneli yeni seri numarasi (barkod) varsa DURUM='Tamamlandi'.\n"
+    "2. Seri numarasi yoksa ve daire karsisinda sadece 'f' isareti varsa DURUM='faruk'.\n"
+    "3. Seri numarasi yoksa ve 'Evde yok', 'Bos', 'Dolap kesilecek' gibi not varsa DURUM='Iptal'.\n"
+    "4. Seri no '30' ile basliyorsa SAYAC TURU='ULTRASONIK', degilse 'SICAK SU'.\n"
+    "5. 'EEY', 'E.Y.', 'Ek yok', 'Sifir' notlari varsa ESKI ENDEKS=0.\n"
+    "6. Seri no kisaltilmis yazildiysa ('// 2681' gibi) ustteki seri bloklarina bakip 8 haneye tamamla.\n"
+    "7. Fotograftaki tum satirlari TEK 'data' listesinde ver; ayni daireyi iki kez yazma "
+    "(seri numarali olani tut).\n"
+    "8. Seri numarasi okunamiyorsa o alani BOS string ('') birak; notu veya aciklamayi ASLA "
+    "'YENI SERI NO (BARKOD)' alanina yazma. Bos satirlari listeye ekleme."
+)
+
+# NVIDIA kucuk modeli bazen basliklari Turkce karakterler olmadan uretir
+# (DAIRE, YENI SERI NO (BARKOD) ...). Pydantic alias'lari aksanli oldugu icin
+# bu degerler dogrulamada sessizce bosalir; asagidaki harita ile kanonik
+# basliklara cevrilir.
+_KEY_ALIASES: dict[str, str] = {
+    "bina": "BİNA",
+    "daire": "DAİRE",
+    "marka": "MARKA",
+    "sayac turu": "SAYAÇ TÜRÜ",
+    "sayac türü": "SAYAÇ TÜRÜ",
+    "durum": "DURUM",
+    "tutar": "TUTAR (TL)",
+    "tutar (tl)": "TUTAR (TL)",
+    "eski endeks": "ESKİ ENDEKS",
+    "yeni seri no": "YENİ SERİ NO (BARKOD)",
+    "yeni seri no (barkod)": "YENİ SERİ NO (BARKOD)",
+    "yeni seri": "YENİ SERİ NO (BARKOD)",
+    "seri no": "YENİ SERİ NO (BARKOD)",
+    "barkod": "YENİ SERİ NO (BARKOD)",
+    "notlar": "NOTLAR",
+    "not": "NOTLAR",
+    "enlem": "ENLEM",
+    "boylam": "BOYLAM",
+}
+
+
+def _normalize_row_keys(row: dict) -> dict:
+    """Satir anahtarlarini kanonik (aksanli) basliklara cevirir.
+
+    Hem aksansiz varyantlari (DAIRE -> DAİRE) hem de Turkce buyuk/kucuk harf
+    farklarini tolere eder; bilinmeyen alanlar aynen korunur.
+    """
+    out: dict = {}
+    for k, v in row.items():
+        key = str(k).strip()
+        canonical = _KEY_ALIASES.get(key.lower())
+        if canonical is None:
+            # Aksanli eslesme: buyuk harf duyarsiz karsilastirma (DAİRE/daire)
+            for alias_value in set(_KEY_ALIASES.values()):
+                if alias_value.casefold() == key.casefold():
+                    canonical = alias_value
+                    break
+        out[canonical or key] = v
+    return out
+
+
+def _get_field(row: dict, *names: str) -> str:
+    """Satirdan ilk bulunan alani doner (kanonik + ASCII varyantlar)."""
+    for name in names:
+        val = row.get(name)
+        if val not in (None, ""):
+            return str(val)
+    return ""
+
+
+def _looks_like_row(row: dict) -> bool:
+    """NVIDIA bazen aciklama/bos obje uretir; gercek satirda daire veya seri vardir."""
+    daire = _get_field(row, "DAİRE", "DAIRE").strip()
+    seri = _get_field(row, "YENİ SERİ NO (BARKOD)", "YENI SERI NO (BARKOD)").strip()
+    return bool(daire or seri)
+
+
+def _dedupe_exact_rows(rows: list[dict]) -> list[dict]:
+    """Birebir ayni satirlari teke indirir.
+
+    Model tekrara dustugunde ayni satiri onlarca kez uretebilir; icerigi
+    tamamen ayni olan satirlar bilgi kaybi olmadan atilabilir.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        fingerprint = json.dumps(row, sort_keys=True, ensure_ascii=False)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        out.append(row)
+    return out
+
+
+def _clean_rows(raw: list) -> list[dict]:
+    """Ham model satirlarini normalize edip gercek satirlari secer."""
+    rows: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        row = _normalize_row_keys(item)
+        # Model bazen JSON yerine duz metni seri alanina koyar ("Evde yok" gibi);
+        # bu degeri seri alaninda tutmak seri eslesmesini/kontrolunu bozar.
+        seri = _get_field(row, "YENİ SERİ NO (BARKOD)")
+        digits = "".join(ch for ch in seri if ch.isdigit())
+        if seri.strip() and len(digits) < 4:
+            logger.info("Model seri alaninda sayisal olmayan deger dondurdu: %r -> bosaltildi.",
+                        seri[:60])
+            row["YENİ SERİ NO (BARKOD)"] = ""
+        if not _looks_like_row(row):
+            continue
+        rows.append(row)
+    deduped = _dedupe_exact_rows(rows)
+    if len(deduped) != len(rows):
+        logger.info("Tekrar eden %d satir atildi (%d -> %d).",
+                    len(rows) - len(deduped), len(rows), len(deduped))
+    return deduped
+
+
 def resize_image_for_api(src_path: str) -> bytes:
     """Gorseli uzun kenar max 2000px olacak sekilde resize edip JPEG bytes doner."""
     with Image.open(src_path) as img:
@@ -132,40 +259,120 @@ def _is_cooled_down(model: str) -> bool:
 
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
+# Tekrar denemede (2. girisim) kullanilan ek talimat: 11B model bazen cevaba
+# basliga/yoruma girip donguye dusuyor; bu eki alinca dogrudan JSON'a basliyor.
+NVIDIA_STRICT_SUFFIX = (
+    "\n\nONEMLI: Sadece JSON yaz. Cevabina dogrudan '{' karakteri ile basla, "
+    "aciklama/baslik/kod blogu yazma."
+)
 
-def _extract_json_object(text: str) -> dict:
-    """Model ciktisindaki ilk gecerli {"data": ...} JSON objesini bulup parse eder.
 
-    Llama-Vision aciklama + ```json fence ekleyebilir, ayrica stream
-    birlesiminde birden fazla JSON blogu olabilir (bu durumda
-    json.loads "Extra data" hatasi verirdi). JSONDecoder.raw_decode ile
-    metni tarayip icinde "data" anahtari olan ilk objeyi secer.
+def _merge_json_data_objects(text: str) -> dict | None:
+    """Metindeki TUM {"data": [...]} objelerini bulup birlestirir.
+
+    Llama-Vision bazen sema ornegini eko edip birden fazla data blogu uretir
+    (json.loads "Extra data" hatasi verirdi). Bloklar birlestirilir, tamamen
+    ayni satirlar tekillestirilir; hic blok yoksa None doner.
     """
     cleaned = text.strip()
     decoder = json.JSONDecoder()
-    # 1) fence iclerini once dene
-    candidates: list[str] = []
-    if "```" in cleaned:
-        for part in cleaned.split("```"):
-            cand = part.strip()
-            if cand.lower().startswith("json"):
-                cand = cand[4:].strip()
-            if "{" in cand:
-                candidates.append(cand)
-    candidates.append(cleaned)
-    for cand in candidates:
+    objects: list[dict] = []
+    for cand in ([*_fenced_candidates(cleaned), cleaned]):
         idx = 0
         while True:
             start = cand.find("{", idx)
             if start < 0:
                 break
             try:
-                obj, end = decoder.raw_decode(cand[start:])
-                if isinstance(obj, dict) and "data" in obj:
-                    return obj
-                idx = start + 1  # data yoksa sonraki { dene
+                obj, _end = decoder.raw_decode(cand[start:])
             except json.JSONDecodeError:
                 idx = start + 1
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("data"), list):
+                objects.append(obj)
+            idx = start + 1
+        if objects:
+            break
+    if not objects:
+        return None
+    if len(objects) > 1:
+        counts = [len(o.get("data") or []) for o in objects]
+        logger.info("Model %d adet JSON blogu dondurdu (satir sayilari=%s), birlestiriliyor.",
+                    len(objects), counts)
+    rows: list[dict] = []
+    for obj in objects:
+        for row in obj.get("data") or []:
+            if isinstance(row, dict):
+                rows.append(row)
+    # Model ayni satiri dongu icinde tekrar uretebilir -> tekillestir
+    return {"data": _dedupe_exact_rows(rows)}
+
+
+def _fenced_candidates(text: str) -> list[str]:
+    """```json ... ``` bloklarinin iceriklerini dondurur."""
+    out: list[str] = []
+    if "```" not in text:
+        return out
+    for part in text.split("```"):
+        cand = part.strip()
+        if cand.lower().startswith("json"):
+            cand = cand[4:].strip()
+        if "{" in cand:
+            out.append(cand)
+    return out
+
+
+def _salvage_partial_rows(text: str) -> list[dict]:
+    """Yarim kalmis (token limiti) {"data": [ {...}, {...}  ciktisindan
+    kapanmis satir objelerini kurtarir; hicbiri yoksa bos liste doner."""
+    idx = text.find('"data"')
+    if idx < 0:
+        return []
+    bracket = text.find("[", idx)
+    if bracket < 0:
+        return []
+    decoder = json.JSONDecoder()
+    rows: list[dict] = []
+    pos = bracket + 1
+    while True:
+        start = text.find("{", pos)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            # Yarim/bozuk blok: sonraki '{' adayini dene (basdaki tekrarli
+            # '{"data": [' kalibi boylece atlanir ve gercek satirlar kurtarilir).
+            pos = start + 1
+            continue
+        if isinstance(obj, dict):
+            if isinstance(obj.get("data"), list):
+                # Model ic ice "data" blogu urettiyse satirlari duzlestir
+                rows.extend(x for x in obj["data"] if isinstance(x, dict))
+            else:
+                rows.append(obj)
+        pos = start + end
+    return _dedupe_exact_rows(rows)
+
+
+def _extract_json_object(text: str) -> dict:
+    """Model ciktisindaki gecerli {"data": ...} JSON objesini bulup parse eder.
+
+    Llama-Vision aciklama + ```json fence ekleyebilir, ayrica stream
+    birlesiminde birden fazla JSON blogu olabilir (bu durumda
+    json.loads "Extra data" hatasi verirdi). JSONDecoder.raw_decode ile
+    metni tarayip icinde "data" anahtari olan objeleri toplar.
+    """
+    cleaned = text.strip()
+    merged = _merge_json_data_objects(cleaned)
+    if merged is not None:
+        return merged
+    salvaged = _salvage_partial_rows(cleaned)
+    if salvaged:
+        logger.warning("Parcalanmis JSON'dan %d satir kurtarildi.", len(salvaged))
+        return {"data": salvaged}
+    decoder = json.JSONDecoder()
+    for cand in [*_fenced_candidates(cleaned), cleaned]:
         # data'li obje bulunamadiysa: bu adaydaki ilk gecerli dict'i kabul et
         idx = 0
         while True:
@@ -173,7 +380,7 @@ def _extract_json_object(text: str) -> dict:
             if start < 0:
                 break
             try:
-                obj, end = decoder.raw_decode(cand[start:])
+                obj, _end = decoder.raw_decode(cand[start:])
                 if isinstance(obj, dict):
                     return obj
                 idx = start + 1
@@ -205,29 +412,51 @@ def _shrink_for_nvidia(image_bytes: bytes) -> bytes:
 
 
 def _call_nvidia(image_bytes_list: list[bytes],
-                 on_first_token: Any | None = None) -> dict:
+                 on_first_token: Any | None = None,
+                 strict: bool = False) -> dict:
+    """Coklu fotografi tek tek okur ve satirlari birlestirir.
+
+    ONEMLI: NVIDIA NIM 11B-vision ucu tek istekte EN FAZLA 1 gorsel kabul eder;
+    fazlasi "400 At most 1 image(s) may be provided in one prompt" hatasi verir
+    (album islemlerinin canlida patlamasinin nedeni buydu). Bu yuzden her gorsel
+    ayri cagrilir, satirlar burada birlestirilir; ayni daireye ait mukerrer
+    satirlarin tekillestirilmesi excel_maker.merge_duplicate_daires'te yapilir.
+    """
+    if not image_bytes_list:
+        raise ValueError("Islenecek gorsel yok.")
+    prompt = NVIDIA_SYSTEM_PROMPT + (NVIDIA_STRICT_SUFFIX if strict else "")
+    merged_rows: list[dict] = []
+    for i, image_bytes in enumerate(image_bytes_list):
+        payload = _call_nvidia_single(image_bytes, prompt,
+                                      on_first_token if i == 0 else None)
+        rows = payload.get("data") or []
+        if not isinstance(rows, list):
+            rows = []
+        logger.info("NVIDIA gorsel %d/%d -> %d ham satir.",
+                    i + 1, len(image_bytes_list), len(rows))
+        merged_rows.extend(r for r in rows if isinstance(r, dict))
+    return {"data": merged_rows}
+
+
+def _call_nvidia_single(image_bytes: bytes, prompt: str,
+                        on_first_token: Any | None = None) -> dict:
     import requests  # yerel import: sadece nvidia yolu kullanildiginda gerekir
 
     if not config.NVIDIA_API_KEY:
         raise ValueError("NVIDIA_API_KEY bos (.env).")
-    shrunk = [_shrink_for_nvidia(b) for b in image_bytes_list]
-    total_kb = sum(len(b) for b in shrunk) // 1024
-    logger.info("NVIDIA'ya %d gorsel gonderiliyor (~%d KB, model=%s).",
-                len(shrunk), total_kb, config.NVIDIA_MODEL)
+    shrunk = _shrink_for_nvidia(image_bytes)
+    logger.info("NVIDIA'ya 1 gorsel gonderiliyor (~%d KB, model=%s).",
+                len(shrunk) // 1024, config.NVIDIA_MODEL)
     content: list[dict] = [
         {
             "type": "text",
-            "text": SYSTEM_PROMPT
-            + "\n\nSADECE gecerli JSON dondur, baska aciklama yazma. Sema: {\"data\": [...]}",
-        }
+            "text": prompt,
+        },
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image_to_base64(shrunk)}"},
+        },
     ]
-    for b in shrunk:
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{image_to_base64(b)}"},
-            }
-        )
     # Stream: ilk token gelince on_first_token() cagrilir (kullaniciya "uretiyor" bilgisi),
     # toplam sure NVIDIA_TIMEOUT_S ile sinirlanir. Stream kapalisi kadar guvenilir,
     # ayrica ilk belirti erken gorunur ve sessiz timeout riski azalir.
@@ -238,7 +467,7 @@ def _call_nvidia(image_bytes_list: list[bytes],
         json={
             "model": config.NVIDIA_MODEL,
             "messages": [{"role": "user", "content": content}],
-            "max_tokens": 2048,
+            "max_tokens": config.NVIDIA_MAX_TOKENS,
             "temperature": 0.0,
             "top_p": 0.95,
             "stream": True,
@@ -250,6 +479,12 @@ def _call_nvidia(image_bytes_list: list[bytes],
         raise RuntimeError(f"NVIDIA API {resp.status_code}: {resp.text[:500]}")
     chunks: list[str] = []
     first_seen = False
+    finish_reason = ""
+    buf = ""             # tam cevap metni (aciklama + JSON) burada toplanir
+    depth = 0            # suslu parantez derinligi ("{" -> +1, "}" -> -1)
+    saw_json_start = False
+    closed_at = -1       # tam JSON objesinin kapandigi andaki buf uzunlugu
+    looping = False
     try:
         for line in resp.iter_lines(decode_unicode=True):
             if not line:
@@ -263,25 +498,74 @@ def _call_nvidia(image_bytes_list: list[bytes],
                 obj = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            choice = (obj.get("choices") or [{}])[0]
+            if isinstance(choice, dict) and choice.get("finish_reason"):
+                finish_reason = str(choice["finish_reason"])
             try:
-                delta = obj["choices"][0]["delta"].get("content") or ""
-            except (KeyError, IndexError, TypeError):
+                delta = choice["delta"].get("content") or ""
+            except (KeyError, IndexError, TypeError, AttributeError):
                 delta = ""
-            if delta:
-                chunks.append(delta)
-                if not first_seen:
-                    first_seen = True
-                    if on_first_token is not None:
-                        try:
-                            on_first_token()
-                        except Exception:
-                            pass
+            if not delta:
+                continue
+            chunks.append(delta)
+            buf += delta
+            if not first_seen:
+                first_seen = True
+                if on_first_token is not None:
+                    try:
+                        on_first_token()
+                    except Exception:
+                        pass
+            # 1) Tam JSON objesi kapandi mi? Model sonrasinda tekrara girse bile
+            #    beklemeden cik (olculdu: 116 sn -> ~10 sn). Yeni bir "data" blogu
+            #    baslarsa (cok fotolu birlesim) okumaya devam et.
+            for ch in delta:
+                if ch == "{":
+                    depth += 1
+                    saw_json_start = True
+                elif ch == "}":
+                    depth -= 1
+            if saw_json_start and depth <= 0 and '"data"' in buf:
+                new_block = '"data"' in delta
+                if new_block:
+                    closed_at = -1
+                elif closed_at < 0:
+                    closed_at = len(buf)
+                elif len(buf) - closed_at > 200:
+                    logger.info("JSON kapandi; kuyruktaki fazlalik atlandi (%d -> %d chr).",
+                                len(buf), closed_at)
+                    break
+            # 2) Tekrar dongusu: ayni 200 karakterlik blok 3+ kez gectiyse kes
+            if len(buf) > 600 and not looping:
+                tail = buf[-200:]
+                if buf.count(tail) >= 3:
+                    looping = True
+                    logger.warning("NVIDIA cikti tekrara dustu, akis kesildi (%.600s...)", buf[:200])
+                    break
     finally:
         resp.close()
-    text = "".join(chunks)
+    if finish_reason == "length":
+        # Cikti token limitine takildi -> JSON yarim kalabilir; parse tarafi
+        # kapanmis bloklari kurtarmaya calisir, logda gorunur olsun.
+        logger.warning("NVIDIA cikti token limitine takildi (max_tokens=%d, %d parca).",
+                       config.NVIDIA_MAX_TOKENS, len(chunks))
+    text = buf
     if not text.strip():
+        logger.warning("NVIDIA stream hic icerik dondurmedi (finish=%r, %d satir).",
+                       finish_reason, len(chunks))
         raise ValueError("NVIDIA bos yanit dondu.")
-    return _extract_json_object(text)
+    try:
+        result = _extract_json_object(text)
+    except Exception:
+        logger.warning("NVIDIA JSON parse edilemedi (finish=%r, %d chr). "
+                       "Ham yanit (ilk 1000 chr): %.1000s",
+                       finish_reason, len(text), text)
+        raise
+    n_rows = len(result.get("data") or []) if isinstance(result, dict) else 0
+    if n_rows < 3:
+        logger.info("NVIDIA az satir uretti (%d) (finish=%r). "
+                    "Ham yanit (ilk 600 chr): %.600s", n_rows, finish_reason, text)
+    return result
 
 
 async def _parse_with_gemini(image_bytes_list: list[bytes]) -> list[dict]:
@@ -299,10 +583,11 @@ async def _parse_with_gemini(image_bytes_list: list[bytes]) -> list[dict]:
                     asyncio.to_thread(_call_gemini_with_config, image_bytes_list, model),
                     timeout=config.GEMINI_TIMEOUT_S,
                 )
-                rows = result.get("data", []) if isinstance(result, dict) else []
+                raw_rows = result.get("data", []) if isinstance(result, dict) else []
+                rows = _clean_rows(raw_rows) if isinstance(raw_rows, list) else []
                 if not rows:
                     raise ValueError("Model veri uretemedi (bos liste).")
-                validated = MeterResult.model_validate(result)
+                validated = MeterResult.model_validate({"data": rows})
                 normalized = validated.model_dump(by_alias=True)
                 logger.info(
                     "Gemini %d satir dondu (model=%s).", len(normalized.get("data", [])), model
@@ -336,17 +621,27 @@ async def _parse_with_nvidia(image_bytes_list: list[bytes],
                         lambda: asyncio.ensure_future(on_progress()))
             else:
                 _cb = None
+            # Her gorsel ayri istek oldugu icin toplam sure gorsel sayisiyla olceklenir.
+            batch_timeout = (config.NVIDIA_TIMEOUT_S + 30) * max(1, len(image_bytes_list))
+            # 2. deneme strict istemle: model basliga/yoruma girip donguye dusmusse
+            # JSON'a dogrudan baslamasi saglanir.
             result = await asyncio.wait_for(
-                asyncio.to_thread(_call_nvidia, image_bytes_list, _cb),
-                timeout=config.NVIDIA_TIMEOUT_S + 30,
+                asyncio.to_thread(_call_nvidia, image_bytes_list, _cb,
+                                  strict=(attempt == 1)),
+                timeout=batch_timeout,
             )
             rows = result.get("data", []) if isinstance(result, dict) else []
+            if not isinstance(rows, list):
+                raise ValueError("Model 'data' listesi uretemedi.")
+            # Anahtarlari kanonik basliklara cevir (DAIRE -> DAİRE ...) ve bos
+            # satirlari at. Aksi halde pydantic alias'lari eslesmez ve tum
+            # degerler bosalir -> "sadece baslikli bos Excel".
+            rows = _clean_rows(rows)
+            logger.info("NVIDIA %d satir dondu (model=%s).", len(rows), config.NVIDIA_MODEL)
             if not rows:
                 raise ValueError("Model veri uretemedi (bos liste).")
-            validated = MeterResult.model_validate(result)
+            validated = MeterResult.model_validate({"data": rows})
             normalized = validated.model_dump(by_alias=True)
-            logger.info("NVIDIA %d satir dondu (model=%s).", len(normalized.get("data", [])),
-                        config.NVIDIA_MODEL)
             return normalized["data"]
         except Exception as exc:  # noqa: BLE001
             last_err = exc
@@ -360,29 +655,41 @@ async def _parse_with_nvidia(image_bytes_list: list[bytes],
 
 
 async def parse_meter_photos(image_paths: list[str], provider: str | None = None,
-                           on_progress: Any | None = None) -> list[dict]:
+                           on_progress: Any | None = None,
+                           used_provider: list[str] | None = None) -> list[dict]:
     """Foto listesini okuyup satir listesi doner.
 
-    provider verilirse ("gemini"/"nvidia") sadece o kullanilir;
-    verilmezse AI_PROVIDER_ORDER sirasinda failover yapilir.
+    provider verilirse ("gemini"/"nvidia") o once denenir; basarisiz olursa
+    diger saglayicilarla yedeklenir (kullanici bos Excel yerine sonuc alir).
+    Verilmezse AI_PROVIDER_ORDER sirasinda failover yapilir.
+    used_provider verilirse gercekten sonucu ureten saglayicinin adi yazilir
+    (bot mesajini ona gore etiketlemek icin).
     Basarisizlikta ValueError yukseltir.
     """
     if not image_paths:
         raise ValueError("Islenecek fotograf bulunamadi.")
     image_bytes_list = [await asyncio.to_thread(resize_image_for_api, p) for p in image_paths]
     total_kb = sum(len(b) for b in image_bytes_list) // 1024
+    if provider in ("gemini", "nvidia"):
+        order = [provider] + [p for p in config.AI_PROVIDER_ORDER if p != provider]
+    else:
+        order = list(config.AI_PROVIDER_ORDER)
     logger.info("AI'ye %d gorsel gonderiliyor (~%d KB) [sira=%s].",
-                len(image_bytes_list), total_kb, "+".join(config.AI_PROVIDER_ORDER))
+                len(image_bytes_list), total_kb, "+".join(order))
     last_err: Exception | None = None
-    order = [provider] if provider in ("gemini", "nvidia") else list(config.AI_PROVIDER_ORDER)
     for prov in order:
         try:
             if prov == "nvidia":
                 if not config.NVIDIA_API_KEY:
                     logger.warning("NVIDIA atlandi: NVIDIA_API_KEY bos.")
                     continue
-                return await _parse_with_nvidia(image_bytes_list, on_progress=on_progress)
-            return await _parse_with_gemini(image_bytes_list)
+                rows = await _parse_with_nvidia(image_bytes_list, on_progress=on_progress)
+            else:
+                rows = await _parse_with_gemini(image_bytes_list)
+            if used_provider is not None:
+                used_provider.clear()
+                used_provider.append(prov)
+            return rows
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             logger.warning("%s saglayicisi basarisiz, siradakine geciliyor: %s | %s",

@@ -23,8 +23,10 @@ services:
       - key: AI_PROVIDER_ORDER
         value: gemini,nvidia
       - key: NVIDIA_TIMEOUT_S
-        value: "120"
+        value: "240"
       - key: NVIDIA_IMAGE_MAX_LONG_EDGE
         value: "1280"
       - key: NVIDIA_IMAGE_JPEG_QUALITY
         value: "80"
+      - key: NVIDIA_MAX_TOKENS
+        value: "4096"

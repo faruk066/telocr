@@ -34,10 +34,15 @@ NVIDIA_MODEL: str = (
     _get_env("NVIDIA_MODEL", default="meta/llama-3.2-11b-vision-instruct")
     or "meta/llama-3.2-11b-vision-instruct"
 )
-NVIDIA_TIMEOUT_S = int(_get_env("NVIDIA_TIMEOUT_S", default="120") or "120")
+# NVIDIA toplam timeout (sn): ucretsiz ucta gecikme 7-120 sn arasinda degisiyor,
+# 120 sn'de kesilmesin diye 240'a cikarildi (akis erken kapandiginda beklemez).
+NVIDIA_TIMEOUT_S = int(_get_env("NVIDIA_TIMEOUT_S", default="240") or "240")
 # NVIDIA'ya gonderilen gorsel kucultulur (hiz icin; Gemini yolu etkilenmez)
 NVIDIA_IMAGE_MAX_LONG_EDGE = int(_get_env("NVIDIA_IMAGE_MAX_LONG_EDGE", default="1280") or "1280")
 NVIDIA_IMAGE_JPEG_QUALITY = int(_get_env("NVIDIA_IMAGE_JPEG_QUALITY", default="80") or "80")
+# Cikti token limiti: form basina ~40 satir x ~60 token. 2048 kesilip JSON'u
+# yarim biraktigi icin 4096'ya cikarildi (olculdu: kisa istemle 3 satir ~7 sn).
+NVIDIA_MAX_TOKENS = int(_get_env("NVIDIA_MAX_TOKENS", default="4096") or "4096")
 
 # NVIDIA yedegi aktif mi? AI_PROVIDER_ORDER icinde "nvidia" gecmeli ve key dolu olmali.
 # Ornek: AI_PROVIDER_ORDER=gemini,nvidia
