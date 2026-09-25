@@ -1,0 +1,30 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Kullanım: repo'ya push'la → Render Dashboard → New → Blueprint → render.yaml'ı seç.
+# Env değerlerini Dashboard'dan gir (TELEGRAM_BOT_TOKEN, GEMINI_API_KEY, NVIDIA_API_KEY).
+services:
+  - type: worker
+    name: telocr-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_FALLBACK_MODELS
+        value: gemini-3.5-flash-lite,gemini-3.1-flash-lite
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_MODEL
+        value: meta/llama-3.2-11b-vision-instruct
+      - key: AI_PROVIDER_ORDER
+        value: gemini,nvidia
+      - key: NVIDIA_TIMEOUT_S
+        value: "120"
+      - key: NVIDIA_IMAGE_MAX_LONG_EDGE
+        value: "1280"
+      - key: NVIDIA_IMAGE_JPEG_QUALITY
+        value: "80"

@@ -1,0 +1,7 @@
+# Konteyner imajına ve yedeğe girmemesi gerekenler
+__pycache__/
+*.pyc
+temp/
+bot.log
+.env
+yedek/
