@@ -244,10 +244,22 @@ def _building_prefix(rows: list[dict]) -> str:
 
 
 def _daire_key(v: object) -> str:
-    """Daire karsilastirmasi icin normalize anahtar: 'Daire 7' -> '7'."""
+    """Daire karsilastirmasi icin normalize anahtar.
+
+    'Daire 7' -> '7', 'B2-1A no 6' -> 'b 2 1 a no 6', 'B2-1A no 11' ->
+    'b 2 1 a no 11' (FARKLI daireler AYRI anahtar alir; sadece ilk rakam
+    kullanilmaz — aksi halde ayni bloktaki butun daireler birbirine karisir).
+    """
     s = str(v or "").strip().lower()
-    m = re.search(r"\d+", s)
-    return m.group(0) if m else s
+    # Yaygin onekleri kaldir: 'daire ', 'daire:', 'daire-'
+    s = re.sub(r"^daire\s*[:\-]?\s*", "", s)
+    # Cizgi/alt cizgi -> bosluk (B2-1A == B2 1A)
+    s = re.sub(r"[-_]+", " ", s)
+    # Harf-rakam sinirlarina bosluk ekle ('b2' -> 'b 2', '1a' -> '1 a', 'no6' -> 'no 6')
+    s = re.sub(r"([a-zçğıöşü])(\d)", r"\1 \2", s)
+    s = re.sub(r"(\d)([a-zçğıöşü])", r"\1 \2", s)
+    # Coklu bosluk -> tek bosluk
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _serial_score(r: dict) -> tuple[int, int]:
@@ -324,9 +336,11 @@ def merge_duplicate_daires(rows: list[dict]) -> list[dict]:
         best[key] = winner
     merged = [best[k] for k in order]
 
-    def _sort_key(r: dict) -> tuple[int, str]:
-        m = re.search(r"\d+", str(r.get("DAİRE", "") or ""))
-        return (int(m.group(0)) if m else 10**9, str(r.get("DAİRE", "")))
+    def _sort_key(r: dict) -> tuple:
+        # Cok parcali daire adlarinda dogru sayisal siralama:
+        # 'B2-1A no 6' -> (2, 1, 6), 'B2-1A no 11' -> (2, 1, 11), 'B2-1A no 12' -> (2, 1, 12)
+        nums = tuple(int(m) for m in re.findall(r"\d+", str(r.get("DAİRE", "") or "")))
+        return (nums, str(r.get("DAİRE", "")))
 
     merged.sort(key=_sort_key)
     return merged
