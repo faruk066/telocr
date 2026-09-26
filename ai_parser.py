@@ -53,6 +53,11 @@ SYSTEM_PROMPT = (
     "sirala. Ayni daireyi iki kez yazma.\n"
     "8. RAKAM DOGRULAMA: Her seri numarasi icin yukaridaki cizgili-7 kuralini uygula. "
     "Ortasi cizgili rakami 1 sanma.\n"
+    "9. TELEFON NUMARALARI: Sana '05xx xxx xx xx' veya '905xx xxx xx xx' gibi 10-11 haneli "
+    "numaralar goruyorsan bunu YENİ SERİ NO (BARKOD) alanina YAZMA. Sayac barkodu 8 haneli "
+    "oldugu icin bu numaralar telefon numarasi olabilir; o satirda dogru seri numarasi yoksa "
+    "DURUM='faruk' veya 'Iptal' yaz ve NOTLAR'a telefon numarasinin oldugunu belirt.\n"
+
     "\nBeklenen JSON Cikti Formati:\n"
     '{"data": [{"BINA": "", "DAIRE": "1", "MARKA": "CALMET", "SAYAC TURU": "ULTRASONIK", '
     '"DURUM": "Tamamlandi", "TUTAR (TL)": "", "ESKI ENDEKS": 0, '
@@ -84,7 +89,9 @@ NVIDIA_SYSTEM_PROMPT = (
     "7. Fotograftaki tum satirlari TEK 'data' listesinde ver; ayni daireyi iki kez yazma "
     "(seri numarali olani tut).\n"
     "8. Seri numarasi okunamiyorsa o alani BOS string ('') birak; notu veya aciklamayi ASLA "
-    "'YENI SERI NO (BARKOD)' alanina yazma. Bos satirlari listeye ekleme."
+    "'YENI SERI NO (BARKOD)' alanina yazma. Bos satirlari listeye ekleme.\n"
+    "9. TELEFON NUMARALARI: 10-11 haneli numaralar (05xx xxx xx xx, 905xx xxx xx xx) "
+    "sayac barkod DEGILDIR; o satirda DURUM='faruk'/'Iptal' yaz ve NOTLAR'a 'telefon' yaz.\n"
 )
 
 # Kimi-K3 (reasoning model) icin AYRI ve KISA istem. Olculmus davranis:
@@ -101,7 +108,8 @@ KIMI_SYSTEM_PROMPT = (
     "DURUM='Iptal'. Seri no '30' ile basliyorsa SAYAC TURU='ULTRASONIK', degilse "
     "'SICAK SU'. 'EEY' notu varsa ESKI ENDEKS=0. Bos satirlari listeye ekleme.\n"
     "DIKKAT: Turkce/Avrupa yaziminda '7' rakaminin ortasinda yatay cizgi vardir; oyle "
-    "yazilan rakam 7'dir, 1 degildir."
+    "yazilan rakam 7'dir, 1 degildir. 10-11 haneli numaralar (05xx, 905xx) sayac barkod "
+    "degildir; o satirda DURUM='faruk'/'Iptal' yaz ve NOTLAR'a 'telefon' yaz.\n"
 )
 
 

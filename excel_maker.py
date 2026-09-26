@@ -35,8 +35,10 @@ HEADER_FONT = Font(bold=True, color="FFFFFF")
 GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
 RED_FILL = PatternFill("solid", fgColor="FFC7CE")
 YELLOW_FILL = PatternFill("solid", fgColor="FFEB9C")
+ORANGE_FILL = PatternFill("solid", fgColor="FCE4D6")
 GREEN_FONT = Font(color="006100")
 RED_FONT = Font(color="9C0006")
+ORANGE_FONT = Font(color="9C4221")
 
 # Mukerrer seri gruplari icin palet: ayni seri -> ayni renk.
 # Acik pastel zemin + koyu yazi (okunabilirlik icin).
@@ -78,12 +80,106 @@ def _looks_like_17_swap(a: str, b: str) -> bool:
     return all({x, y} == {"1", "7"} for x, y in diffs)
 
 
-def validate_rows(rows: list[dict]) -> list[dict]:
-    """8-hane + mukerrer + 1/7 karismasi kontrolu.
+# --- Seri no alanina karisan sahte numaralar (telefon / T.C. kimlik) ----------
+# Sayac barkodu HER ZAMAN tam 8 hanedir ('30...' ultrasonik, '23'/'24' mekanik,
+# '80...' sicak su). Formlara musterinin telefonu ya da kimlik numarasi
+# karistiginda bunlar barkod olarak KAYDEDILMEZ; NOTLAR'a tasinir.
 
-    Sorunlu satira KONTROL NOTU ekler, islemi durdurmaz. Mukerrer seri no ve
-    tek hanede 1<->7 farki olan seriler ozellikle isaretlenir (cigli '7' yazan
-    eller '1' okunabiliyor).
+def _valid_turkish_id(n: str) -> bool:
+    """T.C. kimlik numarasi checksum kontrolu (11 hane, algoritmik olarak tutarli)."""
+    if len(n) != 11 or not n.isdigit() or n[0] == "0":
+        return False
+    d = [int(c) for c in n]
+    if ((d[0] + d[2] + d[4] + d[6] + d[8]) * 7 - (d[1] + d[3] + d[5] + d[7])) % 10 != d[9]:
+        return False
+    return sum(d[:10]) % 10 == d[10]
+
+
+def _phone_core(digits: str) -> str:
+    """Ulke/sabit-hat oneklerini soyup 10 haneli yerel numaraya indirger.
+
+    '00905321234567' -> '5321234567', '905321234567' -> '5321234567',
+    '05321234567' -> '5321234567', '5321234567' -> '5321234567'.
+    """
+    s = digits
+    while s.startswith("00"):
+        s = s[2:]                              # 0090... -> 90...
+    if s.startswith("90") and len(s) > 10:
+        s = s[2:]                              # 90532... -> 532...
+    if s.startswith("0") and len(s) == 11:
+        s = s[1:]                              # 0532... -> 532...
+    return s
+
+
+def _bad_serial_reason(digits: str) -> str:
+    """Bu rakam dizisi barkod OLAMAZSA nedenini doner; gecerliyse bos string.
+
+    Kurallar: 8 hane -> her zaman kabul. 5-7 hane -> kabul ama uyari
+    (kesilmis/eksik okunmus barkod olabilir). 9+ hane -> barkod DEGILDIR;
+    telefon/kimlik deselerine gore tiplendirilir.
+    """
+    n = len(digits)
+    if n <= 8 or not digits.isdigit():
+        return ""
+    # 11 hane telefonla birebir ayni uzunlukta; kimlik kontrolu onekleri
+    # soyulmadan once yapilir (gecerli T.C. no '0' ile baslamaz).
+    if n == 11 and _valid_turkish_id(digits):
+        return "T.C. kimlik numarasi"
+    core = _phone_core(digits)
+    # 10 haneli yerel numara: 5xx mobil, 2xx/3xx/4xx sabit hat, 850/444 hizmet.
+    if len(core) == 10 and core[0] in "23458":
+        return "telefon numarasi"
+    return f"{n} haneli numara (barkod 8 hane olmali)"
+
+
+def _format_phone(digits: str) -> str:
+    """Rakam yiginini okunur telefona cevir: 5321234567 -> 0532 123 45 67."""
+    body = _phone_core(digits)
+    if len(body) != 10:
+        return digits
+    return f"0{body[:3]} {body[3:6]} {body[6:8]} {body[8:]}"
+
+
+# KONTROL NOTU icinde bu isaret bulunan satirlar Excel'de ayrica vurgulanir.
+SERIAL_INVALID_MARK = "SERI NO DEGIL"
+
+
+def sanitize_serials(rows: list[dict]) -> tuple[list[dict], int]:
+    """Seri no alanindaki telefon/kimlik numaralarini cikarip NOTLAR'a tasir.
+
+    Dondurur: (temizlenmis satirlar, cikarilan sahte seri sayisi). Gercek barkod
+    8 hane oldugu icin 9+ haneli deger 'seri var -> Tamamlandi' kuralini da
+    yaniltir; bu yuzden alan bosaltilir, deger NOTLAR'a yazilir, DURUM
+    'Kontrol Edilmeli' yapilir ve satira 'SERI NO DEGIL' isareti konur.
+    """
+    out: list[dict] = []
+    removed = 0
+    for r in rows:
+        row = dict(r)
+        digits = _digits(row.get("YENİ SERİ NO (BARKOD)", ""))
+        reason = _bad_serial_reason(digits)
+        if not reason:
+            out.append(row)
+            continue
+        shown = _format_phone(digits) if reason == "telefon numarasi" else digits
+        note = str(row.get("NOTLAR", "") or "").strip()
+        addition = f"Seri no alanindaki {shown} {reason}"
+        row["NOTLAR"] = f"{note} / {addition}" if note else addition
+        row["YENİ SERİ NO (BARKOD)"] = ""
+        row["DURUM"] = "Kontrol Edilmeli"
+        row["_seri_no_degil"] = shown
+        removed += 1
+        logger.warning("Seri no alanindaki %s cikarildi (%s).", shown, reason)
+        out.append(row)
+    return out, removed
+
+
+def validate_rows(rows: list[dict]) -> list[dict]:
+    """8-hane + mukerrer + 1/7 karismasi + sahte seri (telefon/kimlik) kontrolu.
+
+    Sorunlu satira KONTROL NOTU ekler, islemi durdurmaz. Mukerrer seri no,
+    yalnizca 1/7 ile ayrilan seriler ve seri no sanilan telefon numaralari
+    isaretlenir (cizgili '7' yazan eller '1' okunabiliyor).
     """
     serials = [_digits(r.get("YENİ SERİ NO (BARKOD)", "")) for r in rows]
     counts = Counter(s for s in serials if s)
@@ -92,7 +188,7 @@ def validate_rows(rows: list[dict]) -> list[dict]:
     for r, s in zip(rows, serials):
         if s:
             daire_by_serial.setdefault(s, []).append(str(r.get("DAİRE", "")).strip())
-    # Tüm hanelerinde 1<->7 farki olan seri ciftleri
+    # Tum hanelerinde 1<->7 farki olan seri ciftleri
     near_miss: dict[str, set[str]] = {}
     uniq = sorted(daire_by_serial)
     for i, a in enumerate(uniq):
@@ -103,6 +199,9 @@ def validate_rows(rows: list[dict]) -> list[dict]:
     out: list[dict] = []
     for r, serial in zip(rows, serials):
         warnings: list[str] = []
+        fake = str(r.get("_seri_no_degil", "") or "")
+        if fake:
+            warnings.append(f"{SERIAL_INVALID_MARK}: {fake} barkod degil, NOTLAR'a tasindi")
         if serial:
             if len(serial) != 8:
                 warnings.append(f"Seri no 8 haneli degil ({serial})")
@@ -114,7 +213,7 @@ def validate_rows(rows: list[dict]) -> list[dict]:
                 others = ", ".join(sorted(near_miss[serial]))
                 warnings.append(
                     f"Seri {serial} ile {others} yalnizca 1/7 farki iceriyor; "
-                    "cigli 7 / dikey 1 ayrimini kontrol et")
+                    "cizgili 7 / dikey 1 ayrimini kontrol et")
         if daire_counts[_daire_key(r.get("DAİRE", ""))] > 1:
             warnings.append(f"Ayni daire birden fazla satirda ({r.get('DAİRE', '')})")
         # Mevcut NOTLAR'i koru, kontrol notunu ayri sutuna yaz
@@ -166,10 +265,18 @@ def make_excel(rows: list[dict], out_dir: str | None = None) -> str:
     out_dir = out_dir or config.TEMP_DIR
     os.makedirs(out_dir, exist_ok=True)
 
-    merged = merge_duplicate_daires(rows)
-    if len(merged) != len(rows):
+    # 1) Seri no alanina karisan telefon/kimlik numaralari BIRAKILMAZ:
+    #    birlestirme ONCE temizlenmis satirlar uzerinde calisir (boylece
+    #    11 haneli telefon, 8 haneli gercek barkoddan 'daha net' sayilip
+    #    kazanmaz) ve sahte degerler NOTLAR'a tasinir.
+    sanitized, removed = sanitize_serials(rows)
+    if removed:
+        logger.info("Seri no alanindan %d sahte deger (telefon/kimlik) cikarildi.", removed)
+
+    merged = merge_duplicate_daires(sanitized)
+    if len(merged) != len(sanitized):
         logger.info("Cok-fotolu birlestirme: %d -> %d satir (mukerrer daireler tekillendi).",
-                    len(rows), len(merged))
+                    len(sanitized), len(merged))
     validated = validate_rows(merged)
     df = pd.DataFrame(validated, columns=COLUMNS)
 
@@ -249,6 +356,10 @@ def _format_workbook(path: str) -> None:
         seri_idx = COLUMNS.index("YENİ SERİ NO (BARKOD)") + 1
     except ValueError:
         seri_idx = 8
+    try:
+        notu_idx = COLUMNS.index("KONTROL NOTU") + 1
+    except ValueError:
+        notu_idx = 0
     dup_groups = _duplicate_serial_groups(ws, seri_idx)
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         cell = row[durum_idx - 1]
@@ -261,6 +372,10 @@ def _format_workbook(path: str) -> None:
             cell.font = RED_FONT
         elif val == "faruk":
             cell.fill = YELLOW_FILL
+        # Seri no alanindaki telefon/kimlik numarasi cikarildiysa turuncu vurgu
+        if notu_idx and SERIAL_INVALID_MARK in str(row[notu_idx - 1].value or ""):
+            cell.fill = ORANGE_FILL
+            cell.font = ORANGE_FONT
     _paint_duplicate_serials(ws, seri_idx, dup_groups)
 
     # Otomatik sutun genisligi (max 40)
